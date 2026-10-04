@@ -1,0 +1,556 @@
+# =====================================================================
+#  Focus Board  (Streamlit)  —  ฉบับใส่คำอธิบายภาษาไทย
+#  โค้ดต้นฉบับ: Project-coompro/app.py ของกลุ่ม 4
+#  (ตรรกะเหมือนเดิมทุกอย่าง เพิ่มแค่คอมเมนต์ # สำหรับอ่านทำความเข้าใจ)
+#
+#  แนวคิดสำคัญของ Streamlit ที่ต้องรู้ก่อนอ่าน:
+#   1) ทุกครั้งที่ผู้ใช้กดปุ่ม/พิมพ์อะไร Streamlit จะ "รันไฟล์นี้ใหม่ตั้งแต่บรรทัดแรก"
+#   2) ค่าที่อยากให้จำข้ามการรันใหม่ ต้องเก็บใน st.session_state
+#   3) st.rerun() = สั่งให้รันไฟล์ใหม่ทันที (ใช้หลังเปลี่ยนข้อมูลเพื่ออัปเดตหน้าจอ)
+#   4) st.stop()  = สั่งให้หยุดรันโค้ดที่เหลือในรอบนี้
+# =====================================================================
+
+
+# ---------------------------------------------------------------------
+# โซน 1: เตรียมของ (import + ค่าคงที่)
+# ---------------------------------------------------------------------
+import json                                   # อ่าน/เขียนไฟล์ข้อมูลแบบ JSON
+from datetime import date, datetime, time, timedelta   # จัดการวันที่และเวลา
+import re                                     # regex ใช้ทำความสะอาดชื่อผู้ใช้
+from pathlib import Path                      # จัดการ path ไฟล์/โฟลเดอร์
+from uuid import uuid4                        # สร้าง ID สุ่มที่ไม่ซ้ำกัน
+import streamlit as st                        # ตัวสร้างหน้าเว็บ
+
+# ตัวเลือกต่าง ๆ ประกาศไว้ที่เดียว อยากเพิ่มหมวดใหม่ก็แก้ตรงนี้ที่เดียว
+CATEGORIES = ["Personal", "Study", "Work", "Project"]
+PRIORITIES = ["Low", "Medium", "High"]
+
+# dictionary: "ข้อความที่โชว์ให้ผู้ใช้เห็น" -> "ตัวเลขนาทีที่เก็บจริง"
+REMINDER_OPTIONS = {
+    "No reminder": 0,
+    "5 minutes before": 5,
+    "15 minutes before": 15,
+    "30 minutes before": 30,
+    "1 hour before": 60,
+    "1 day before": 1440,      # 1 วัน = 24 x 60 = 1440 นาที
+}
+
+
+# ---------------------------------------------------------------------
+# โซน 2: หน้าตาเว็บ
+# ---------------------------------------------------------------------
+
+# ตั้งค่าหน้าเว็บ (ต้องเรียกเป็นคำสั่ง Streamlit ตัวแรกของไฟล์)
+st.set_page_config(
+    page_title="Focus Board",          # ชื่อที่แสดงบนแท็บเบราว์เซอร์
+    page_icon="✅",                    # ไอคอนบนแท็บ
+    layout="wide",                     # ใช้เต็มความกว้างหน้าจอ
+    initial_sidebar_state="collapsed", # พับ sidebar ไว้ตั้งแต่เริ่ม
+)
+
+# ฉีด CSS เข้าไปแต่งหน้าตา (ส่วนนี้ไม่มี logic ข้ามได้ถ้าไม่สนเรื่องสี)
+# unsafe_allow_html=True = อนุญาตให้ใช้ HTML/CSS ดิบได้
+st.markdown(
+    """
+    <style>
+    /* กำหนดตัวแปรสีหลัก: ส้มสำหรับจุดเด่น เขียวสำหรับงานที่เสร็จ */
+    :root {
+        --focus-accent: #e07a5f;
+        --focus-success: #81b29a;
+    }
+    .main { background: var(--background-color); }
+
+    /* ซ่อน sidebar และปุ่มเปิด/ปิด sidebar ทั้งหมด */
+    section[data-testid="stSidebar"],
+    [data-testid="stSidebar"],
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="stSidebarNav"],
+    button[aria-label="Open sidebar"],
+    button[aria-label="Close sidebar"] {
+        display: none !important;
+    }
+    [data-testid="stAppViewContainer"] > .main {
+        margin-left: 0 !important;
+    }
+
+    /* หัวเรื่องใหญ่ (Hero) */
+    .hero { padding: 1.2rem 0 1rem; }
+    .eyebrow { color: var(--focus-accent); font-weight: 700; letter-spacing: .12em; text-transform: uppercase; font-size: .78rem; }
+    .hero h1, .hero p, .metric, .metric h2 { color: var(--text-color) !important; }
+    .hero h1 { font-size: 3rem; margin: .2rem 0; }
+    .hero p { font-size: 1.05rem; }
+
+    /* กล่องตัวเลขสถิติ (Total / Active / Completed / High priority) */
+    .metric { background: var(--secondary-background-color); border: 1px solid var(--text-color); border-radius: 10px; padding: 1rem; }
+    .metric h2 { margin: .35rem 0 0; }
+
+    /* การ์ดงานแต่ละอัน: ขอบซ้ายสีส้ม */
+    .task-card { background: var(--secondary-background-color); border-left: 5px solid var(--focus-accent); border-radius: 8px; padding: .85rem 1rem; margin-bottom: .65rem; box-shadow: 0 2px 8px rgba(32,38,37,.04); }
+    /* ถ้างานเสร็จแล้ว: ขอบเขียว + จางลง */
+    .task-card.done { border-left-color: var(--focus-success); opacity: .7; }
+    .task-title, .task-meta { color: var(--text-color) !important; }
+    .task-title { font-size: 1.05rem; font-weight: 650; }
+    .task-title.done { text-decoration: line-through; }   /* ขีดฆ่าชื่อ */
+    .task-meta { font-size: .82rem; margin-top: .35rem; opacity: .8; }
+
+    /* Responsive: จอมือถือ (กว้างไม่เกิน 768px) ให้คอลัมน์ขึ้นบรรทัดใหม่ได้ */
+    @media (max-width: 768px) {
+        .hero h1 { font-size: 2.2rem; }
+        .metric { padding: .7rem; }
+        .metric h2 { font-size: 1.35rem; }
+        [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+            row-gap: .5rem;
+        }
+        [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+            min-width: 46% !important;
+            flex: 1 1 46% !important;
+        }
+        [data-testid="stHorizontalBlock"] button {
+            white-space: normal !important;
+            min-height: 2.6rem;
+        }
+    }
+
+    /* Responsive: จอแท็บเล็ต (769px - 1100px) */
+    @media (min-width: 769px) and (max-width: 1100px) {
+        .hero h1 { font-size: 2.5rem; }
+        [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+            row-gap: .5rem;
+        }
+        [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+            min-width: 23% !important;
+            flex: 1 1 23% !important;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ---------------------------------------------------------------------
+# โซน 3: ด่านกรอกชื่อ (Login แบบง่าย)
+# ---------------------------------------------------------------------
+# ถ้ายังไม่มี "profile_name" ใน session_state แปลว่ายังไม่ได้กรอกชื่อ
+if "profile_name" not in st.session_state:
+    st.markdown("# Focus Board")
+    st.write("ใส่ชื่อของคุณเพื่อเปิดรายการงานส่วนตัว")
+
+    # st.form = รวมช่องกรอกหลายช่องไว้ แล้วค่อยส่งทีเดียวตอนกดปุ่ม
+    with st.form("profile_form"):
+        entered_name = st.text_input("Your name", placeholder="เช่น Alice")
+        continue_button = st.form_submit_button("Continue", type="primary")
+
+    if continue_button:
+        clean_name = entered_name.strip()          # ตัดช่องว่างหัวท้ายออก
+        if not clean_name:
+            st.error("กรุณาใส่ชื่อก่อนเข้าใช้งาน")   # ไม่ได้พิมพ์อะไรเลย
+        else:
+            st.session_state.profile_name = clean_name   # จำชื่อไว้
+            st.rerun()                                   # รันใหม่ รอบหน้าจะผ่านด่านนี้
+
+    st.info("ข้อมูลจะแยกตามชื่อที่กรอกในเบราว์เซอร์นี้")
+    st.stop()   # หยุดตรงนี้! โค้ดข้างล่างทั้งหมดจะไม่ทำงานจนกว่าจะกรอกชื่อ
+
+
+# ---------------------------------------------------------------------
+# โซน 4: ระบบเก็บข้อมูล (ไฟล์ JSON แยกตามชื่อผู้ใช้)
+# ---------------------------------------------------------------------
+
+# เปลี่ยนตัวอักษรที่ไม่ใช่ a-z A-Z 0-9 _ - ให้เป็น "_" เพื่อใช้เป็นชื่อไฟล์ได้ปลอดภัย
+# และตัดให้ยาวไม่เกิน 40 ตัว
+# (ข้อสังเกต: ชื่อภาษาไทยจะกลายเป็น "_" ทั้งหมด ทำให้คนชื่อไทยต่างกันอาจชนไฟล์เดียวกัน)
+profile_key = re.sub(r"[^a-zA-Z0-9_-]", "_", st.session_state.profile_name)[:40]
+
+# ตำแหน่งไฟล์ เช่น user_data/Alice.json
+DATA_FILE = Path("user_data") / f"{profile_key}.json"
+DATA_FILE.parent.mkdir(exist_ok=True)   # สร้างโฟลเดอร์ user_data ถ้ายังไม่มี
+
+
+def load_tasks():
+    """อ่านงานจากไฟล์ JSON ถ้าไม่มีไฟล์หรือไฟล์พัง ให้คืน list ว่าง"""
+    try:
+        if DATA_FILE.exists():
+            with DATA_FILE.open("r", encoding="utf-8") as file:
+                data = json.load(file)
+            # ป้องกันกรณีไฟล์ไม่ใช่ list: ถ้าไม่ใช่ list คืน [] แทน
+            return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        # JSON พัง หรือเปิดไฟล์ไม่ได้
+        st.warning("ไม่สามารถอ่านไฟล์ข้อมูลเดิมได้ จึงเริ่มรายการใหม่")
+    return []
+
+
+def save_tasks(tasks):
+    """บันทึกรายการงานทั้งหมดลงไฟล์ JSON (เรียกทุกครั้งที่ข้อมูลเปลี่ยน)"""
+    try:
+        with DATA_FILE.open("w", encoding="utf-8") as file:
+            # ensure_ascii=False -> เก็บภาษาไทยเป็นตัวอักษรจริง ไม่ใช่ \u0e01
+            # indent=2 -> จัดย่อหน้าให้คนเปิดไฟล์อ่านง่าย
+            json.dump(tasks, file, ensure_ascii=False, indent=2)
+    except OSError as error:
+        st.error(f"บันทึกข้อมูลไม่สำเร็จ: {error}")
+
+
+# ---------------------------------------------------------------------
+# โซน 5: ฟังก์ชันช่วย (ประกาศไว้ก่อน แล้วโซน 6 ค่อยเรียกใช้)
+# ---------------------------------------------------------------------
+
+def add_task(tasks, title, category, priority, due_date, due_time, reminder, notes):
+    """สร้างงานใหม่แล้วเพิ่มเข้า list tasks"""
+    due_at = ""
+    if due_date:
+        # รวม "วัน" กับ "เวลา" เป็นก้อนเดียว
+        # ถ้าไม่ได้เลือกเวลา ใช้ 17:00 เป็นค่าตั้งต้น
+        # .isoformat() แปลงเป็นข้อความ เช่น "2026-10-10T17:00:00" (เก็บลง JSON ได้)
+        due_at = datetime.combine(due_date, due_time or time(17, 0)).isoformat()
+
+    tasks.append(
+        {
+            "id": str(uuid4()),                          # ID ไม่ซ้ำ ใช้อ้างอิงงานตอนลบ/แก้
+            "title": title.strip(),
+            "category": category,
+            "priority": priority,
+            "due_at": due_at,                            # "" ถ้าไม่มี deadline
+            "reminder_minutes": REMINDER_OPTIONS[reminder],   # แปลงข้อความ -> นาที
+            "notes": notes.strip(),
+            "completed": False,                          # งานใหม่ยังไม่เสร็จ
+        }
+    )
+
+
+def task_matches(task, search_text, category, status):
+    """เช็คว่างานนี้ผ่านตัวกรองหรือไม่ (คืน True/False) ต้องผ่านครบทั้ง 3 เงื่อนไข"""
+    # รวมชื่อ + โน้ต เป็นตัวพิมพ์เล็กเพื่อค้นหาแบบไม่สนตัวใหญ่เล็ก
+    searchable_text = f"{task['title']} {task.get('notes', '')}".lower()
+
+    matches_search = search_text.lower() in searchable_text          # 1) ตรงคำค้นหา
+    matches_category = category == "All" or task["category"] == category   # 2) ตรงหมวด
+    matches_status = (                                               # 3) ตรงสถานะ
+        status == "All"
+        or (status == "Active" and not task["completed"])
+        or (status == "Completed" and task["completed"])
+    )
+    return matches_search and matches_category and matches_status
+
+
+def sort_tasks(tasks):
+    """เรียงงาน: ยังไม่เสร็จก่อน -> deadline ใกล้สุดก่อน -> ความสำคัญสูงก่อน"""
+    priority_order = {"High": 0, "Medium": 1, "Low": 2}   # เลขน้อย = มาก่อน
+    return sorted(
+        tasks,
+        key=lambda task: (
+            task["completed"],   # False(0) มาก่อน True(1) -> งานค้างอยู่บน
+            # งานที่ไม่มี deadline ใช้วันปลอม 9999 เพื่อให้ไปอยู่ท้าย
+            task.get("due_at", task.get("due_date", "")) or "9999-12-31T23:59:59",
+            priority_order.get(task["priority"], 3),
+        ),
+    )
+
+
+def format_due_date(value):
+    """แปลง deadline เป็นข้อความอ่านง่าย เช่น 'Due 10 Oct 2026 at 17:00'"""
+    if not value:
+        return "No deadline"
+    try:
+        if "T" in value:
+            # รูปแบบใหม่: มีทั้งวันและเวลา
+            due = datetime.fromisoformat(value)
+            return f"Due {due.strftime('%d %b %Y at %H:%M')}"
+        # รูปแบบเก่า: มีแค่วัน
+        due = date.fromisoformat(value)
+        return f"Due {due.strftime('%d %b %Y')}"
+    except ValueError:
+        return "Invalid deadline"
+
+
+def get_task_due(task):
+    """ดึงค่า deadline: ใช้ due_at (ใหม่) ถ้าไม่มีลอง due_date (ข้อมูลเก่า) เพื่อให้เข้ากันได้"""
+    return task.get("due_at") or task.get("due_date", "")
+
+
+def format_reminder(task):
+    """แปลงนาทีเป็นข้อความ เช่น 15 -> 'Reminder 15 min before'"""
+    reminder = int(task.get("reminder_minutes", 0))
+    if reminder == 0:
+        return "No reminder"
+    if reminder < 60:
+        return f"Reminder {reminder} min before"
+    if reminder % 1440 == 0:                       # หารด้วย 1440 ลงตัว = เป็นหน่วยวัน
+        return f"Reminder {reminder // 1440} day before"
+    return f"Reminder {reminder // 60} hr before"  # ที่เหลือเป็นหน่วยชั่วโมง
+
+
+def ics_escape(value):
+    """ใส่ \\ นำหน้าอักขระพิเศษ (\\ ; , และขึ้นบรรทัดใหม่) เพราะไฟล์ .ics ตีความอักขระเหล่านี้พิเศษ"""
+    return str(value).replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+def create_calendar_event(task):
+    """สร้างข้อความไฟล์ปฏิทิน .ics (เปิดได้ใน Google Calendar / Apple Calendar)"""
+    due_value = get_task_due(task)
+    due = datetime.fromisoformat(due_value)
+    # กิจกรรมยาว 30 นาที นับจากเวลา deadline
+    end = due.replace(second=0, microsecond=0) + timedelta(minutes=30)
+    start_text = due.strftime("%Y%m%dT%H%M%S")    # รูปแบบเวลาของไฟล์ .ics
+    end_text = end.strftime("%Y%m%dT%H%M%S")
+
+    reminder = int(task.get("reminder_minutes", 0))
+    alarm = ""
+    if reminder:
+        # VALARM = ตัวแจ้งเตือน, TRIGGER:-PT15M แปลว่า "ก่อนเริ่ม 15 นาที"
+        alarm = (
+            "BEGIN:VALARM\n"
+            f"TRIGGER:-PT{reminder}M\n"
+            "ACTION:DISPLAY\n"
+            f"DESCRIPTION:{ics_escape(task['title'])}\n"
+            "END:VALARM\n"
+        )
+
+    # ประกอบเป็นข้อความไฟล์ .ics ตามมาตรฐาน iCalendar
+    return (
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Focus Board//EN\n"
+        "BEGIN:VEVENT\n"
+        f"UID:{task['id']}@focus-board\n"
+        f"DTSTART:{start_text}\nDTEND:{end_text}\n"
+        f"SUMMARY:{ics_escape(task['title'])}\n"
+        f"DESCRIPTION:{ics_escape(task.get('notes', ''))}\n"
+        f"CATEGORIES:{ics_escape(task.get('category', ''))}\n"
+        f"{alarm}END:VEVENT\nEND:VCALENDAR\n"
+    )
+
+
+# ---------------------------------------------------------------------
+# โซน 6: หน้าจอหลัก (ส่วนที่ผู้ใช้เห็นและกดได้)
+# ---------------------------------------------------------------------
+
+# โหลดงานจากไฟล์ "ครั้งเดียว" ตอนเริ่ม แล้วเก็บใน session_state
+# รอบถัดไปจะใช้ข้อมูลในหน่วยความจำ ไม่ต้องอ่านไฟล์ซ้ำ
+if "tasks" not in st.session_state:
+    st.session_state.tasks = load_tasks()
+
+# ---- 6.1 หัวเรื่อง ----
+st.markdown(
+    """
+    <div class="hero">
+        <div class="eyebrow">Personal productivity workspace</div>
+        <h1>Focus Board</h1>
+        <p>จัดระเบียบงาน เริ่มจากสิ่งสำคัญ และเห็นความคืบหน้าในที่เดียว</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ---- 6.2 แถบโปรไฟล์ + ปุ่มเปลี่ยนโปรไฟล์ ----
+account_columns = st.columns([8, 1])    # แบ่ง 2 คอลัมน์ สัดส่วนกว้าง 8:1
+with account_columns[0]:
+    st.caption(f"โปรไฟล์: {st.session_state.profile_name}")
+with account_columns[1]:
+    if st.button("Change profile"):
+        del st.session_state["profile_name"]   # ลืมชื่อ -> รอบหน้ากลับไปหน้ากรอกชื่อ
+        st.rerun()
+
+# ---- 6.3 คำนวณตัวเลขสถิติ ----
+all_tasks = st.session_state.tasks
+# sum ของ True/False = นับจำนวน True (True นับเป็น 1)
+completed_count = sum(task["completed"] for task in all_tasks)
+active_count = len(all_tasks) - completed_count
+# นับงานที่ "ความสำคัญสูง และ ยังไม่เสร็จ"
+high_priority_count = sum(
+    task["priority"] == "High" and not task["completed"] for task in all_tasks
+)
+# สัดส่วนความคืบหน้า 0-1 (ถ้าไม่มีงานเลยให้เป็น 0 กันหารด้วยศูนย์)
+progress = completed_count / len(all_tasks) if all_tasks else 0
+
+# ---- 6.4 โชว์กล่องสถิติ 4 ช่อง ----
+metric_columns = st.columns(4)
+metrics = [
+    ("Total tasks", len(all_tasks)),
+    ("Active", active_count),
+    ("Completed", completed_count),
+    ("High priority", high_priority_count),
+]
+# zip จับคู่ "คอลัมน์" กับ "(ชื่อ, ตัวเลข)" ไปพร้อมกันทีละคู่
+for column, (label, value) in zip(metric_columns, metrics):
+    column.markdown(
+        f'<div class="metric"><div>{label}</div><h2>{value}</h2></div>',
+        unsafe_allow_html=True,
+    )
+
+# แถบความคืบหน้า
+st.progress(progress, text=f"Progress: {completed_count}/{len(all_tasks)} completed")
+st.divider()
+
+# ---- 6.5 ฟอร์มเพิ่มงาน (อยู่ในกล่องที่พับได้) ----
+with st.expander("➕ Add a task", expanded=False):
+    # clear_on_submit=True -> กดส่งแล้วล้างช่องกรอกให้อัตโนมัติ
+    with st.form("add_task_form", clear_on_submit=True):
+        title = st.text_input("Task name", placeholder="What needs to happen?")
+
+        form_columns = st.columns(3)
+        with form_columns[0]:
+            category = st.selectbox("Category", CATEGORIES)
+        with form_columns[1]:
+            priority = st.select_slider("Priority", options=PRIORITIES, value="Medium")
+        with form_columns[2]:
+            due_date = st.date_input("Deadline", value=None)   # value=None = เว้นว่างได้
+
+        due_time = st.time_input("Time", value=time(17, 0))
+        reminder = st.selectbox("Reminder", list(REMINDER_OPTIONS))   # โชว์เฉพาะ "ชื่อ" (key)
+        notes = st.text_area("Notes", placeholder="Optional details...")
+        submitted = st.form_submit_button("Add task", use_container_width=True)
+
+    if submitted:
+        if not title.strip():
+            st.error("กรุณาใส่ชื่องานก่อนเพิ่มรายการ")
+        else:
+            add_task(st.session_state.tasks, title, category, priority, due_date, due_time, reminder, notes)
+            save_tasks(st.session_state.tasks)    # บันทึกลงไฟล์ทันที
+            st.success("เพิ่มงานแล้ว")
+            st.rerun()
+
+# ---- 6.6 แถบค้นหาและตัวกรอง ----
+filter_columns = st.columns([2, 1, 1])
+with filter_columns[0]:
+    search_text = st.text_input("Search", placeholder="Search tasks or notes...")
+with filter_columns[1]:
+    selected_category = st.selectbox("Category", ["All"] + CATEGORIES)
+with filter_columns[2]:
+    selected_status = st.selectbox("Status", ["All", "Active", "Completed"])
+
+st.caption("All = แสดงทุกหมวดหมู่หรือทุกสถานะ โดยไม่กรองรายการ")
+
+# list comprehension: "เรียงงานก่อน แล้วเก็บเฉพาะอันที่ผ่านตัวกรอง"
+visible_tasks = [
+    task
+    for task in sort_tasks(all_tasks)
+    if task_matches(task, search_text, selected_category, selected_status)
+]
+
+st.subheader(f"Tasks · {len(visible_tasks)}")
+
+if not visible_tasks:
+    # (ข้อสังเกต: ข้อความบอก "จากแถบด้านซ้าย" แต่จริง ๆ sidebar ถูกซ่อนแล้ว
+    #  ฟอร์มเพิ่มงานอยู่ในกล่อง "Add a task" ด้านบนแทน)
+    st.info("ยังไม่มีงานที่ตรงกับตัวกรอง ลองเพิ่มงานจากแถบด้านซ้าย")
+
+# ---- 6.7 วนแสดงการ์ดงานทีละอัน ----
+for task in visible_tasks:
+    is_done = task["completed"]
+    # เลือก class CSS ตามสถานะ: เสร็จแล้วใช้ "done" (ขอบเขียว/ขีดฆ่า)
+    card_class = "task-card done" if is_done else "task-card"
+    title_class = "task-title done" if is_done else "task-title"
+
+    # ถ้ามีโน้ตค่อยสร้างบรรทัดโน้ต ถ้าไม่มีให้เป็นสตริงว่าง
+    notes_html = (
+        f'<div class="task-meta">{task["notes"]}</div>'
+        if task.get("notes")
+        else ""
+    )
+
+    # วาดการ์ด: ✓ ถ้าเสร็จ / ○ ถ้ายังไม่เสร็จ แล้วต่อด้วยรายละเอียดงาน
+    # (ข้อสังเกต: ชื่อ/โน้ตถูกใส่ลง HTML ตรง ๆ ถ้าผู้ใช้พิมพ์โค้ด HTML จะถูกตีความจริง
+    #  แก้ได้ด้วย html.escape())
+    st.markdown(
+        f'<div class="{card_class}"><div class="{title_class}">{"✓" if is_done else "○"} {task["title"]}</div>'
+        f'<div class="task-meta">{task["category"]} · {task["priority"]} priority · {format_due_date(get_task_due(task))} · {format_reminder(task)}</div>'
+        f'{notes_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # แถวปุ่ม 5 คอลัมน์ (4 ปุ่ม + ช่องว่างกว้างด้านขวา)
+    # หมายเหตุ: ทุกปุ่มต้องมี key ที่ไม่ซ้ำกัน จึงต่อท้ายด้วย task['id']
+    action_columns = st.columns([1, 1, 1, 1, 6])
+
+    # ปุ่ม Done / Undo: สลับสถานะเสร็จ <-> ไม่เสร็จ
+    if action_columns[0].button("Undo" if is_done else "Done", key=f"done_{task['id']}"):
+        task["completed"] = not task["completed"]
+        save_tasks(all_tasks)
+        st.rerun()
+
+    # ปุ่ม Delete: สร้าง list ใหม่ที่ "ตัดงานนี้ออก" (เทียบด้วย id)
+    if action_columns[1].button("Delete", key=f"delete_{task['id']}"):
+        st.session_state.tasks = [item for item in all_tasks if item["id"] != task["id"]]
+        save_tasks(st.session_state.tasks)
+        st.rerun()
+
+    # ปุ่ม Edit: สลับเปิด/ปิดฟอร์มแก้ไขของงานนี้ (จำสถานะไว้ใน session_state)
+    if action_columns[2].button("Edit", key=f"edit_{task['id']}"):
+        st.session_state[f"editing_{task['id']}"] = not st.session_state.get(f"editing_{task['id']}", False)
+        st.rerun()
+
+    # ปุ่ม Add to Calendar
+    if get_task_due(task):
+        # มี deadline -> ให้โหลดไฟล์ .ics ได้
+        action_columns[3].download_button(
+            "Add to Calendar",
+            data=create_calendar_event(task),
+            file_name=f"{task['title']}.ics",
+            mime="text/calendar",
+            key=f"calendar_{task['id']}",
+        )
+    else:
+        # ไม่มี deadline -> ปุ่มกดไม่ได้ (เทา) พร้อมคำแนะนำ
+        action_columns[3].button(
+            "Add to Calendar",
+            key=f"calendar_disabled_{task['id']}",
+            disabled=True,
+            help="กด Edit แล้วกำหนดวันและเวลาก่อนเพิ่มเข้า Calendar",
+        )
+        st.caption("กำหนดวันและเวลาก่อนกด Add to Calendar")
+
+    # ---- 6.8 ฟอร์มแก้ไข (โผล่เมื่อกด Edit) ----
+    if st.session_state.get(f"editing_{task['id']}", False):
+        # แตก deadline เดิมเป็น "วัน" กับ "เวลา" เพื่อใส่เป็นค่าตั้งต้นในฟอร์ม
+        current_due = get_task_due(task)
+        try:
+            parsed_due = datetime.fromisoformat(current_due)
+            current_due_date = parsed_due.date()
+            current_due_time = parsed_due.time().replace(second=0, microsecond=0)
+        except (ValueError, TypeError):
+            # ข้อมูลเก่า (มีแต่วัน) หรือไม่มี deadline เลย
+            try:
+                current_due_date = date.fromisoformat(current_due) if current_due else None
+            except ValueError:
+                current_due_date = None
+            current_due_time = time(17, 0)
+
+        with st.form(f"edit_form_{task['id']}"):
+            edited_title = st.text_input("Task name", value=task["title"])
+            edited_priority = st.select_slider("Priority", options=PRIORITIES, value=task["priority"])
+            edited_due_date = st.date_input("Deadline", value=current_due_date)
+            edited_due_time = st.time_input("Time", value=current_due_time)
+
+            # หาว่าตัวเตือนปัจจุบันตรงกับข้อความไหน (ย้อนจาก "นาที" -> "ชื่อ")
+            # next(...) = เอาตัวแรกที่เจอ ถ้าไม่เจอใช้ "No reminder"
+            current_reminder = next(
+                (
+                    label
+                    for label, minutes in REMINDER_OPTIONS.items()
+                    if minutes == task.get("reminder_minutes", 0)
+                ),
+                "No reminder",
+            )
+            edited_reminder = st.selectbox(
+                "Reminder", list(REMINDER_OPTIONS), index=list(REMINDER_OPTIONS).index(current_reminder)
+            )
+            edited_notes = st.text_area("Notes", value=task.get("notes", ""))
+            save_edit = st.form_submit_button("Save changes")
+
+        # กด Save และชื่องานไม่ว่าง -> อัปเดตค่าใน dict ของงานนี้ (หมวดหมู่แก้ไม่ได้)
+        if save_edit and edited_title.strip():
+            task["title"] = edited_title.strip()
+            task["priority"] = edited_priority
+            task["due_at"] = (
+                datetime.combine(edited_due_date, edited_due_time).isoformat()
+                if edited_due_date
+                else ""
+            )
+            task["reminder_minutes"] = REMINDER_OPTIONS[edited_reminder]
+            task["notes"] = edited_notes.strip()
+            save_tasks(all_tasks)                                  # บันทึกลงไฟล์
+            st.session_state[f"editing_{task['id']}"] = False      # ปิดฟอร์มแก้ไข
+            st.rerun()
